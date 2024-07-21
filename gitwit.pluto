@@ -92,6 +92,18 @@ function gitwit.downloadpackfile(url_base, commit_hash)
     return downloadpackfileaux(url_base, body)
 end
 
+function gitwit.downloadfullpackfile(url_base, commit_hash)
+    if commit_hash == nil then
+        commit_hash = gitwit.fetchrefs(url_base).HEAD
+    end
+    assert(#commit_hash == 40)
+    local body = "0011command=fetch001eagent=git/2.40.0.windows.10016object-format=sha10001000dthin-pack000finclude-tag000dofs-delta0032want "..commit_hash.."\n"
+            .. "0032want "..commit_hash.."\n"
+            .. "0009done\n"
+            .. "0000"
+    return downloadpackfileaux(url_base, body)
+end
+
 function gitwit.downloadpartialpackfile(url_base, want, have)
     assert(#want == 40)
     assert(#have == 40)
@@ -235,12 +247,17 @@ function gitwit.parsepackfile(packfile, base_objects)
                 data = data,
                 raw_data = decompressed,
                 hash = crypto.sha1(typenames[type].." "..#decompressed.."\0"..decompressed),
+                compressed_data = packfile:sub(i, i + info.compressed_size - 1),
+                compressed_base = base?.hash,
+                compressed_length = length,
                 offset = obj_offset,
             })
         end
 
         i += info.compressed_size
     end
+    --print(crypto.sha1(packfile:sub(1, i - 1)))
+    --print(packfile:sub(i):split(""):map(|x| -> string.format("%02x", x:byte())):concat(""))
     return objects
 end
 
@@ -298,6 +315,78 @@ function gitwit.listallfilesaux(objects, files, prefix, tree)
             })
         end
     end
+end
+
+function gitwit.createpackfile(objects)
+    local data = { "PACK", string.pack(">I4I4", 2, #objects) }
+    local offset = 12
+    local offsets = {}
+    for objects as object do
+        local typeid = object.typeid
+        local base_in_packfile = false
+        if object.compressed_base then
+            base_in_packfile = offsets[object.compressed_base]
+            if base_in_packfile then
+                typeid = 6
+            else
+                typeid = 7
+            end
+        end
+        offsets[object.hash] = offset
+
+        local length = object.compressed_length or #object.raw_data
+        local byte = length & 0b1111
+        length >>= 4
+        byte |= (typeid << 4)
+        if length ~= 0 then
+            byte |= 0x80
+        end
+        data:insert(string.char(byte)) offset += 1
+        while length ~= 0 do
+            byte = length & 0x7f
+            length >>= 7
+            if length ~= 0 then
+                byte |= 0x80
+            end
+            data:insert(string.char(byte)) offset += 1
+        end
+
+        if object.compressed_data then
+            if object.compressed_base then
+                if base_in_packfile then
+                    -- https://github.com/git/git/blob/26e47e261e969491ad4e3b6c298450c061749c9e/builtin/pack-objects.c#L409-L419
+                    local delta = offsets[object.hash] - offsets[object.compressed_base]
+                    local bytes = { delta & 0x7f }
+                    delta >>= 7
+                    while delta ~= 0 do
+                        delta -= 1
+                        bytes:insert(0x80 | (delta & 0x7f))
+                        delta >>= 7
+                    end
+                    for i = #bytes, 1, -1 do
+                        data:insert(string.char(bytes[i])) offset += 1
+                    end
+                else
+                    data:insert((object.compressed_base:gsub("..", |x| -> string.char(tonumber(x, 16))))) offset += 20
+                end
+            end
+            data:insert(object.compressed_data) offset += #object.compressed_data
+        else
+            length = #object.raw_data
+            local i = 1
+            while length >= 0xffff do
+                data:insert(string.pack("<I1I2I2", 0, 0xffff, 0)) offset += 5
+                data:insert(object.raw_data:sub(i, i + 0xfffe)) offset += 0xffff
+                i += 0xffff
+                length -= 0xffff
+            end
+            data:insert(string.pack("<I1I2I2", 1, length, length ~ 0xffff)) offset += 5
+            data:insert(object.raw_data:sub(i)) offset += length
+        end
+    end
+    data = data:concat("")
+    data ..= crypto.sha1(data, true)
+    return data
 end
 
 return gitwit
