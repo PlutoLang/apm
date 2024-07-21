@@ -35,8 +35,8 @@ function gitwit.parserefs(data)
     return refs
 end
 
-function gitwit.fetchpackfile(url_base, commit_hash)
-    return gitwit.parsepackfile(gitwit.downloadpackfile(url_base, commit_hash))
+function gitwit.fetchpackfile(url_base, commit_hash, base_objects: ?table)
+    return gitwit.parsepackfile(gitwit.downloadpackfile(url_base, commit_hash, base_objects), base_objects)
 end
 
 local function downloadpackfileaux(url_base, body)
@@ -79,14 +79,28 @@ local function downloadpackfileaux(url_base, body)
     return packfile
 end
 
-function gitwit.downloadpackfile(url_base, commit_hash)
+function gitwit.downloadpackfile(url_base, commit_hash, base_objects: ?table)
     if commit_hash == nil then
         commit_hash = gitwit.fetchrefs(url_base).HEAD
     end
     assert(#commit_hash == 40)
-    -- This is what my client sent with 'git clone --no-checkout --depth=1'
-    local body = "0011command=fetch001eagent=git/2.40.0.windows.10016object-format=sha10001000dthin-pack000finclude-tag000dofs-delta000cdeepen 10032want "..commit_hash.."\n"
-            .. "0032want "..commit_hash.."\n"
+    -- This is based on what my client sent with 'git clone --no-checkout --depth=1'. I think the duplicated request is a quirk of protocol version 2.
+    local request = "0032want "..commit_hash.."\n"
+    if base_objects then
+        local have = {}
+        for base_objects as object do
+            if object.type == "commit" then
+                have:insert(object.hash)
+            end
+        end
+        for have as hash do
+            request ..= "0032have "..hash.."\n"
+        end
+        for have as hash do
+            request ..= "0035shallow "..hash.."\n"
+        end
+    end
+    local body = "0011command=fetch001eagent=git/2.40.0.windows.10016object-format=sha10001000dthin-pack000finclude-tag000dofs-delta000cdeepen 1"..request..request
             .. "0009done\n"
             .. "0000"
     return downloadpackfileaux(url_base, body)
@@ -99,17 +113,6 @@ function gitwit.downloadfullpackfile(url_base, commit_hash)
     assert(#commit_hash == 40)
     local body = "0011command=fetch001eagent=git/2.40.0.windows.10016object-format=sha10001000dthin-pack000finclude-tag000dofs-delta0032want "..commit_hash.."\n"
             .. "0032want "..commit_hash.."\n"
-            .. "0009done\n"
-            .. "0000"
-    return downloadpackfileaux(url_base, body)
-end
-
-function gitwit.downloadpartialpackfile(url_base, want, have)
-    assert(#want == 40)
-    assert(#have == 40)
-    local body = "0011command=fetch001eagent=git/2.40.0.windows.10016object-format=sha10001000dthin-pack000finclude-tag000dofs-delta000cdeepen 10032want "..want.."\n0032have "..have.."\n"
-            .. "0032want "..want.."\n"
-            .. "0032have "..have.."\n"
             .. "0009done\n"
             .. "0000"
     return downloadpackfileaux(url_base, body)
@@ -238,7 +241,9 @@ function gitwit.parsepackfile(packfile, base_objects)
 
         if type <= #typenames then
             local data = decompressed
-            if type == 2 then
+            if type == 1 then
+                data = gitwit.parsecommit(data)
+            elseif type == 2 then
                 data = gitwit.parsetree(data)
             end
             objects:insert({
@@ -263,6 +268,18 @@ end
 
 function gitwit.blobhash(data)
     return crypto.sha1("blob "..#data.."\0"..data)
+end
+
+function gitwit.parsecommit(data)
+    local sep = data:find("\n\n")
+    local commit = {
+        message = data:sub(sep + 2):rstrip("\n")
+    }
+    for data:sub(1, sep - 1):split("\n") as line do
+        sep = line:find(" ")
+        commit[line:sub(1, sep - 1)] = line:sub(sep + 1)
+    end
+    return commit
 end
 
 function gitwit.parsetree(data)
@@ -292,9 +309,7 @@ function gitwit.parsetree(data)
     return files
 end
 
-function gitwit.listallfiles(objects)
-    local root_tree = objects:find(|x| -> x.type == "tree")
-    assert(root_tree)
+function gitwit.listallfiles(objects, root_tree)
     local files = {}
     gitwit.listallfilesaux(objects, files, "", root_tree)
     return files

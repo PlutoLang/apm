@@ -172,20 +172,21 @@ __apm_atexit = setmetatable({}, {
 		local num_up2date = 0
 		local num_updated = 0
 		for packages as pkg do
-			local local_commit_hash
 			local arr = pkg.url:split("/")
 			local packfile_path = ".apm_cache/"..arr[#arr].."."..string.format("%08x", crypto.joaat(pkg.url))..".pack" -- including url hash just in case package name is not unique
 			if io.exists(packfile_path) then
 				pkg.objects = gitwit.parsepackfile(io.contents(packfile_path))
-				assert(pkg.objects[1].type == "commit")
-				local_commit_hash = pkg.objects[1].hash
+			else
+				pkg.objects = {}
 			end
-			if pkg.desired_commit_hash ~= local_commit_hash then
+			if not pkg.objects:find(|x| -> x.hash == pkg.desired_commit_hash) then
 				num_updated += 1
 				print("Downloading "..pkg.url.." (at "..pkg.desired_version..")...")
-				local packfile = gitwit.downloadpackfile(pkg.url, pkg.desired_commit_hash)
-				io.contents(packfile_path, packfile)
-				pkg.objects = gitwit.parsepackfile(packfile)
+				local packfile = gitwit.downloadpackfile(pkg.url, pkg.desired_commit_hash, pkg.objects)
+				for gitwit.parsepackfile(packfile, pkg.objects) as new_obj do
+					pkg.objects:insert(new_obj)
+				end
+				io.contents(packfile_path, gitwit.createpackfile(pkg.objects))
 				pkg.updated = true
 			else
 				num_up2date += 1
@@ -199,7 +200,9 @@ __apm_atexit = setmetatable({}, {
 		local num_updated_files = 0
 		local num_files = 0
 		for packages as pkg do
-			local remote_files = gitwit.listallfiles(pkg.objects)
+			local commit = pkg.objects:find(|x| -> x.hash == pkg.desired_commit_hash)
+			local tree = pkg.objects:find(|x| -> x.hash == commit.data.tree)
+			local remote_files = gitwit.listallfiles(pkg.objects, tree)
 			for pkg.files as file do
 				local any_matches = false
 				for remote_files as file_entry do
