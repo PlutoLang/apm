@@ -1,0 +1,243 @@
+if not compareversions or compareversions(_PVERSION:sub(7), "0.10.0") < 0 then
+	error("APM requires Pluto 0.10.0 or higher") -- because gitwit requires crypto.deflate
+end
+
+local { crypto, gitwit } = require "*"
+
+local packages = {}
+
+git = function(remote_url)
+	packages:insert({
+		url = remote_url,
+		files = {},
+	})
+end
+
+local last_from
+from = function(path)
+	last_from = path
+end
+to = function(path)
+	assert(last_from, "'to' must be preceeded by 'from'")
+	packages[#packages].files:insert({
+		from = last_from,
+		to = path
+	})
+	last_from = nil
+end
+
+version = function(version)
+	packages[#packages].version = version
+end
+
+local function countstr(i, singular, plural)
+	if i == 1 then
+		return "1 "..singular
+	end
+	return i.." "..plural
+end
+
+local function version_matches_constraints(constraints, version)
+    for constraints as constraint do
+        if constraint[1] == "^" then
+            if compareversions(version, constraint:sub(2)) < 0 then
+                return false
+            end
+            local [major, minor] = constraint:sub(2):split("."):map(tonumber)
+            minor ??= 0
+            if major == 0 then
+                if compareversions(version, $"0.{minor + 1}") >= 0 then
+                    return false
+                end
+            else
+                if compareversions(version, major + 1) >= 0 then
+                    return false
+                end
+            end
+        elseif constraint[1] == "~" then
+            if compareversions(version, constraint:sub(2)) < 0 then
+                return false
+            end
+            local [major, minor] = constraint:sub(2):split("."):map(tonumber)
+            minor ??= 0
+            if compareversions(version, $"{major}.{minor + 1}") >= 0 then
+                return false
+            end
+        elseif constraint[1] == ">" then
+            if constraint[2] == "=" then
+                if compareversions(version, constraint:sub(3)) < 0 then
+                    return false
+                end
+            else
+                if compareversions(version, constraint:sub(2)) <= 0 then
+                    return false
+                end
+            end
+        elseif constraint[1] == "<" then
+            if constraint[2] == "=" then
+                if compareversions(version, constraint:sub(3)) > 0 then
+                    return false
+                end
+            else
+                if compareversions(version, constraint:sub(2)) >= 0 then
+                    return false
+                end
+            end
+        else
+            if version ~= constraint then
+                return false
+            end
+        end
+    end
+    return true
+end
+local function get_highest_matching_version(filter, versions)
+    local constraints = filter:split(" ")
+    local highest_matching
+    for versions as version do
+        if version_matches_constraints(constraints, version) then
+            if not highest_matching or compareversions(version, highest_matching) > 0 then
+                highest_matching = version
+            end
+        end
+    end
+    return highest_matching
+end
+assert(get_highest_matching_version("^1.0", { "1.0.0" }) == "1.0.0")
+assert(get_highest_matching_version("^1.0", { "1.0.0", "1.0.1" }) == "1.0.1")
+assert(get_highest_matching_version("^1.0", { "1.0.0", "1.0.1", "1.1" }) == "1.1")
+assert(get_highest_matching_version("~1.0", { "1.0.0", "1.0.1", "1.1" }) == "1.0.1")
+assert(get_highest_matching_version(">=1.0 <1.1", { "1.0.0", "1.0.1", "1.1" }) == "1.0.1")
+
+local function matchfile(pattern, name)
+    pattern = pattern:gsub("%.", "%%."):gsub("%*", "(.+)")
+    local t = table.pack(string.find(name, pattern))
+    if t[1] then
+        t.n = nil
+        t:remove(1)
+        t:remove(1)
+        return t
+    end
+    return nil
+end
+
+__apm_atexit = setmetatable({}, {
+	__gc = function()
+		if #packages == 0 then
+			print([[Welcome to APM! Configure your project's dependencies like so:]].."\n"
+				..[[]].."\n"
+				..[[git "https://github.com/PlutoLang/pluto-websocket"]].."\n"
+				..[[    from "websocket.pluto" to "lib/websocket.pluto"]].."\n"
+				..[[]].."\n"
+				..[[git "https://github.com/omni-wf/warframe-public-export-plus"]].."\n"
+				..[[    version "^0.4"]].."\n"
+				..[[    from "*.json" to "data/*.json"]].."\n"
+				)
+			return
+		end
+
+		print("Fetching versions for "..countstr(#packages, "package", "packages").."...")
+		for packages as pkg do
+			local refs = gitwit.fetchrefs(pkg.url)
+			pkg.desired_version = "HEAD"
+			pkg.desired_commit_hash = refs.HEAD
+			if pkg.version then
+				local versions = {}
+				local version_map = {}
+				for ref, hash in refs do
+					if ref:sub(1, 10) == "refs/tags/" then
+						local tag = ref:sub(11)
+						if tag[1] == "v" then
+							tag = tag:sub(2)
+						end
+						versions:insert(tag)
+						version_map[tag] = hash
+					end
+				end
+				if version := get_highest_matching_version(pkg.version, versions) then
+					pkg.desired_version = version
+					pkg.desired_commit_hash = version_map[version]
+				else
+					print(pkg.url.." has no version matching '"..pkg.version.."'")
+				end
+			end
+		end
+
+		if not io.exists(".apm_cache") then
+			io.makedir(".apm_cache")
+		end
+
+		-- Ensure up-to-date packfiles for all packages
+		local num_up2date = 0
+		local num_updated = 0
+		for packages as pkg do
+			local local_commit_hash
+			local arr = pkg.url:split("/")
+			local packfile_path = ".apm_cache/"..arr[#arr].."."..string.format("%08x", crypto.joaat(pkg.url))..".pack" -- including url hash just in case package name is not unique
+			if io.exists(packfile_path) then
+				pkg.objects = gitwit.parsepackfile(io.contents(packfile_path))
+				assert(pkg.objects[1].type == "commit")
+				local_commit_hash = pkg.objects[1].hash
+			end
+			if pkg.desired_commit_hash ~= local_commit_hash then
+				num_updated += 1
+				print("Downloading "..pkg.url.." (at "..pkg.desired_version..")...")
+				local packfile = gitwit.downloadpackfile(pkg.url, pkg.desired_commit_hash)
+				io.contents(packfile_path, packfile)
+				pkg.objects = gitwit.parsepackfile(packfile)
+				pkg.updated = true
+			else
+				num_up2date += 1
+			end
+		end
+		print(countstr(num_updated, "package", "packages").." downloaded; "..countstr(num_up2date, "was", "were").." up-to-date in cache.")
+
+		-- Ensure local files are present as desired.
+		local num_created = 0
+		local num_repaired = 0
+		local num_updated_files = 0
+		local num_files = 0
+		for packages as pkg do
+			local remote_files = gitwit.listallfiles(pkg.objects)
+			for pkg.files as file do
+				local any_matches = false
+				for remote_files as file_entry do
+					if substitutions := matchfile(file.from, file_entry.path) then
+						any_matches = true
+						num_files += 1
+						local to = file.to
+						for i = 1, #substitutions do
+							to = to:replace("*", substitutions[i])
+						end
+						local need_to_fetch = true
+						if io.exists(to) then
+							if gitwit.blobhash(io.contents(to) or "") == file_entry.hash then
+								need_to_fetch = false
+							else
+								if pkg.updated then
+									num_updated_files += 1
+								else
+									num_repaired += 1
+								end
+							end
+						else
+							num_created += 1
+						end
+						if need_to_fetch then
+							local object = pkg.objects:find(|x| -> x.hash == file_entry.hash)
+							local parent = io.part(to, "parent")
+							if parent ~= "" then
+								io.makedirs(parent)
+							end
+							io.contents(to, object.data)
+						end
+					end
+				end
+				if not any_matches then
+					print("Failed to find any file matching '"..file.from.."' in package.")
+				end
+			end
+		end
+		print("Processed "..countstr(num_files, "file", "files")..": "..num_created.." created, "..num_updated_files.." updated, "..num_repaired.." repaired.")
+	end
+})

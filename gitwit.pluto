@@ -1,0 +1,303 @@
+local crypto = require "pluto:crypto"
+local http = require "pluto:http"
+local socket = require "pluto:socket"
+local url = require "pluto:url"
+
+local gitwit = {}
+
+-- returns a table like: { ["HEAD"] = "<sha1 hash>", ["refs/heads/senpai"] = "<sha1 hash>", ["refs/tags/0.1.0"] = "<sha1 hash>" }
+function gitwit.fetchrefs(url_base)
+    return gitwit.parserefs(gitwit.downloadrefs(url_base))
+end
+
+function gitwit.downloadrefs(url_base)
+    return http.request(url_base.."/info/refs?service=git-upload-pack")
+end
+
+function gitwit.parserefs(data)
+    local i = 1
+    local unpacked = ""
+    while i < #data do
+        local chunk_size = tonumber(data:sub(i, i + 3), 16)
+        if chunk_size < 4 then
+            chunk_size = 4
+        end
+        unpacked ..= data:sub(i + 4, i + chunk_size - 1)
+        i += chunk_size
+    end
+    local refs = {}
+    for unpacked:split("\n") as line do
+        if #line ~= 0 and line[1] ~= "#" then
+            local [hash, ref] = line:split("\0")[1]:split(" ")
+            refs[ref] = hash
+        end
+    end
+    return refs
+end
+
+function gitwit.fetchpackfile(url_base, commit_hash)
+    return gitwit.parsepackfile(gitwit.downloadpackfile(url_base, commit_hash))
+end
+
+local function downloadpackfileaux(url_base, body)
+    local { host, path } = url.parse(url_base.."/git-upload-pack")
+    local s = socket.connect(host, 443)
+    assert(s, "failed to connect to "..host)
+    assert(s:starttls(host), "failed to establish a secure tunnel to "..host)
+    s:send("POST "..path.." HTTP/1.0\r\n"
+        .. "Host: "..host.."\r\n"
+        .. "User-Agent: PlutoLang/gitwit\r\n"
+        .. "Git-Protocol: version=2\r\n"
+        .. "Content-Type: application/x-git-upload-pack-request\r\n"
+        .. "Content-Length: "..#body.."\r\n"
+        .. "\r\n"
+        .. body
+        )
+    -- Now we gotta parse this shit: https://git-scm.com/docs/gitprotocol-v2
+    -- I don't wanna handle a pkt-line possibly being sent over multiple TLS records, so we're buffering it first.
+    local data = ""
+    while chunk := s:recv() do
+        data ..= chunk
+    end
+    data = data:sub(data:find("\r\n\r\n") + 4)
+    local i = 1
+    local packfile = ""
+    while true do
+        local chunk_size = tonumber(data:sub(i, i + 3), 16)
+        --print(chunk_size)
+        --if data:sub(i + 4, i + 4) == "\2" then
+            --print(data:sub(i + 5, i + chunk_size - 1))
+        --end
+        if data:sub(i + 4, i + 4) == "\1" then
+            packfile ..= data:sub(i + 5, i + chunk_size - 1)
+        end
+        if chunk_size == 0 then
+            break
+        end
+        i += chunk_size
+    end
+    return packfile
+end
+
+function gitwit.downloadpackfile(url_base, commit_hash)
+    if commit_hash == nil then
+        commit_hash = gitwit.fetchrefs(url_base).HEAD
+    end
+    assert(#commit_hash == 40)
+    -- This is what my client sent with 'git clone --no-checkout --depth=1'
+    local body = "0011command=fetch001eagent=git/2.40.0.windows.10016object-format=sha10001000dthin-pack000finclude-tag000dofs-delta000cdeepen 10032want "..commit_hash.."\n"
+            .. "0032want "..commit_hash.."\n"
+            .. "0009done\n"
+            .. "0000"
+    return downloadpackfileaux(url_base, body)
+end
+
+function gitwit.downloadpartialpackfile(url_base, want, have)
+    assert(#want == 40)
+    assert(#have == 40)
+    local body = "0011command=fetch001eagent=git/2.40.0.windows.10016object-format=sha10001000dthin-pack000finclude-tag000dofs-delta000cdeepen 10032want "..want.."\n0032have "..have.."\n"
+            .. "0032want "..want.."\n"
+            .. "0032have "..have.."\n"
+            .. "0009done\n"
+            .. "0000"
+    return downloadpackfileaux(url_base, body)
+end
+
+-- https://git-scm.com/docs/gitformat-pack
+-- https://github.com/robisonsantos/packfile_reader
+local typenames <const> = { "commit", "tree", "blob", "tag" }
+function gitwit.parsepackfile(packfile, base_objects)
+    local objects = {}
+    assert(packfile:sub(1, 4) == "PACK")
+    assert(string.unpack(">I4", packfile, 5) == 2)
+    local num_objects = string.unpack(">I4", packfile, 9)
+    local i = 13
+    for obj = 1, num_objects do
+        local obj_offset = i
+        local byte = packfile:byte(i)
+        i += 1
+        local type = (byte >> 4) & 0b111
+        assert(type ~= 0)
+
+        local length = byte & 0b1111
+        local has_more = (byte >> 7) ~= 0
+        local shift = 4
+        while has_more do
+            byte = packfile:byte(i)
+            i += 1
+            length |= (byte & 0b1111111) << shift
+            shift += 7
+            has_more = (byte >> 7) ~= 0
+        end
+
+        local base
+        if type == 6 then
+            -- OBJ_OFS_DELTA, has an offset before the compressed data
+            -- https://github.com/git/git/blob/26e47e261e969491ad4e3b6c298450c061749c9e/builtin/pack-objects.c#L1443-L1473
+            byte = packfile:byte(i)
+            i += 1
+            local offset = (byte & 0b1111111)
+            has_more = (byte >> 7) ~= 0
+            while has_more do
+                byte = packfile:byte(i)
+                i += 1
+                offset += 1
+                offset = (offset << 7) + (byte & 0b1111111)
+                has_more = (byte >> 7) ~= 0
+            end
+            offset = (obj_offset - offset)
+            base = objects:find(|x| -> x.offset == offset)
+        elseif type == 7 then
+            -- OBJ_REF_DELTA, has an object hash before the compressed data
+            if base_objects then
+                local base_hash = packfile:sub(i, i + 19):split(""):map(|x| -> string.format("%02x", x:byte())):concat("")
+                base = base_objects:find(|x| -> x.hash == base_hash)
+            end
+            i += 20
+        end
+
+        local decompressed, info = crypto.deflate(packfile:sub(i), length)
+
+        if type == 6 or type == 7 then
+            type = base.typeid
+            local data = {}
+            local j = 1
+
+            -- skip size of base object
+            while (decompressed:byte(j) >> 7) ~= 0 do
+                j += 1
+            end
+            j += 1
+
+            -- skip size of undeltified object
+            while (decompressed:byte(j) >> 7) ~= 0 do
+                j += 1
+            end
+            j += 1
+
+            while j < #decompressed do
+                local insn = decompressed:byte(j)
+                j += 1
+                if (insn >> 7) == 0 then
+                    -- Add new data
+                    data:insert(decompressed:sub(j, j + insn - 1))
+                    j += insn
+                else
+                    -- Copy from base object
+                    local cp_offset = 0
+                    local cp_size = 0
+                    if (insn & 1) ~= 0 then
+                        cp_offset |= decompressed:byte(j)
+                        j += 1
+                    end
+                    if ((insn >> 1) & 1) ~= 0 then
+                        cp_offset |= decompressed:byte(j) << 8
+                        j += 1
+                    end
+                    if ((insn >> 2) & 1) ~= 0 then
+                        cp_offset |= decompressed:byte(j) << 16
+                        j += 1
+                    end
+                    if ((insn >> 3) & 1) ~= 0 then
+                        cp_offset |= decompressed:byte(j) << 24
+                        j += 1
+                    end
+                    if ((insn >> 4) & 1) ~= 0 then
+                        cp_size |= decompressed:byte(j)
+                        j += 1
+                    end
+                    if ((insn >> 5) & 1) ~= 0 then
+                        cp_size |= decompressed:byte(j) << 8
+                        j += 1
+                    end
+                    if ((insn >> 6) & 1) ~= 0 then
+                        cp_size |= decompressed:byte(j) << 16
+                        j += 1
+                    end
+                    if cp_size == 0 then
+                        cp_size = 0x10000
+                    end
+                    cp_offset += 1
+                    data:insert(base.raw_data:sub(cp_offset, cp_offset + cp_size - 1))
+                end
+            end
+            decompressed = data:concat("")
+        end
+
+        if type <= #typenames then
+            local data = decompressed
+            if type == 2 then
+                data = gitwit.parsetree(data)
+            end
+            objects:insert({
+                typeid = type,
+                type = typenames[type],
+                data = data,
+                raw_data = decompressed,
+                hash = crypto.sha1(typenames[type].." "..#decompressed.."\0"..decompressed),
+                offset = obj_offset,
+            })
+        end
+
+        i += info.compressed_size
+    end
+    return objects
+end
+
+function gitwit.blobhash(data)
+    return crypto.sha1("blob "..#data.."\0"..data)
+end
+
+function gitwit.parsetree(data)
+    local files = {}
+    local i = 1
+    while i < #data do
+        local mode = {}
+        local name = {}
+        while i < #data and data[i] ~= " " do
+            mode:insert(data[i])
+            i += 1
+        end
+        i += 1
+        while i < #data and data[i] ~= "\0" do
+            name:insert(data[i])
+            i += 1
+        end
+        i += 1
+        local hash = data:sub(i, i + 19):split(""):map(|x| -> string.format("%02x", x:byte())):concat("")
+        i += 20
+        files:insert({
+            mode = mode:concat(""),
+            name = name:concat(""),
+            hash = hash,
+        })
+    end
+    return files
+end
+
+function gitwit.listallfiles(objects)
+    local root_tree = objects:find(|x| -> x.type == "tree")
+    assert(root_tree)
+    local files = {}
+    gitwit.listallfilesaux(objects, files, "", root_tree)
+    return files
+end
+
+function gitwit.listallfilesaux(objects, files, prefix, tree)
+    for tree.data as file do
+        if file.mode == "40000" then
+            local data = objects:find(|x| -> x.hash == file.hash)
+            assert(data)
+            gitwit.listallfilesaux(objects, files, prefix .. file.name .. "/", data)
+        else
+            files:insert({
+                mode = file.mode,
+                name = file.name,
+                path = prefix .. file.name,
+                hash = file.hash,
+            })
+        end
+    end
+end
+
+return gitwit
