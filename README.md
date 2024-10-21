@@ -21,8 +21,8 @@ git "https://github.com/PlutoLang/pluto-websocket"
 But you can also restrict the version and use wildcards:
 
 ```elixir
-git "https://github.com/omni-wf/warframe-public-export-plus"
-    version "^0.4"
+git "https://github.com/calamity-inc/warframe-public-export-plus"
+    version "^0.5"
     from "*.json" to "data/*.json"
 ```
 
