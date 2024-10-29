@@ -1,8 +1,5 @@
 ## Getting Started
 
-> [!WARNING]
-> APM currently depends on Pluto 0.10.0, which is still in development.
-
 APM uses [Pluto](https://pluto-lang.org/) (a fork of Lua) as the configuration format.
 
 1. Be sure to [install Pluto](https://pluto-lang.org/docs/Getting%20Started), if you haven't already.

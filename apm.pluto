@@ -1,5 +1,5 @@
 if not compareversions or compareversions(_PVERSION:sub(7), "0.10.0") < 0 then
-	error("APM requires Pluto 0.10.0 or higher") -- because gitwit requires crypto.deflate
+	error("APM requires Pluto 0.10.0 or higher") -- because gitwit requires crypto.decompress
 end
 
 local crypto = require "pluto:crypto"

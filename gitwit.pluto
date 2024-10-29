@@ -171,7 +171,7 @@ function gitwit.parsepackfile(packfile, base_objects)
             i += 20
         end
 
-        local decompressed, info = crypto.deflate(packfile:sub(i), length)
+        local decompressed, info = crypto.decompress(packfile:sub(i), length)
 
         if type == 6 or type == 7 then
             type = base.typeid
