@@ -182,8 +182,7 @@ __apm_atexit = setmetatable({}, {
 			if not pkg.objects:find(|x| -> x.hash == pkg.desired_commit_hash) then
 				num_updated += 1
 				print("Downloading "..pkg.url.." (at "..pkg.desired_version..")...")
-				local packfile = gitwit.downloadpackfile(pkg.url, pkg.desired_commit_hash, pkg.objects)
-				for gitwit.parsepackfile(packfile, pkg.objects) as new_obj do
+				for gitwit.fetchpackfile(pkg.url, pkg.desired_commit_hash, pkg.objects) as new_obj do
 					pkg.objects:insert(new_obj)
 				end
 				io.contents(packfile_path, gitwit.createpackfile(pkg.objects))
