@@ -111,7 +111,7 @@ assert(get_highest_matching_version("~1.0", { "1.0.0", "1.0.1", "1.1" }) == "1.0
 assert(get_highest_matching_version(">=1.0 <1.1", { "1.0.0", "1.0.1", "1.1" }) == "1.0.1")
 
 local function matchfile(pattern, name)
-    pattern = pattern:gsub("%.", "%%."):gsub("%*", "(.+)")
+    pattern = pattern:gsub("%.", "%%."):gsub("%*", "(.+)"):gsub("%-", "%%-")
     local t = table.pack(string.find(name, pattern))
     if t[1] then
         t.n = nil
