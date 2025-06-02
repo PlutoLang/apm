@@ -123,11 +123,14 @@ end
 local typenames <const> = { "commit", "tree", "blob", "tag" }
 function gitwit.parsepackfile(packfile, base_objects)
     local objects = {}
-    assert(packfile:sub(1, 4) == "PACK")
-    assert(string.unpack(">I4", packfile, 5) == 2)
-    local num_objects = string.unpack(">I4", packfile, 9)
-    local i = 13
-    for obj = 1, num_objects do
+    local i = packfile:find("PACK") -- Try to locate "PACK", which may be slightly offset in the case of a bundle file: https://git-scm.com/docs/gitformat-bundle
+    assert(i, "Invalid packfile")
+    i += 4
+    local format, num_objects
+    format, i = string.unpack(">I4", packfile, i)
+    assert(format == 2, "Invalid packfile")
+    num_objects, i = string.unpack(">I4", packfile, i)
+    for _obj = 1, num_objects do
         local obj_offset = i
         local byte = packfile:byte(i)
         i += 1
@@ -404,4 +407,101 @@ function gitwit.createpackfile(objects)
     return data
 end
 
-return gitwit
+if debug.getinfo(3) then
+    -- Loaded as library
+    return gitwit
+end
+
+-- Used as CLI tool
+if arg[1] and arg[2] then
+    if arg[1] == "refs" and arg[2] then
+        for name, hash in gitwit.fetchrefs(arg[2]) do
+            print(hash, name)
+        end
+        return
+    end
+    if arg[1] == "clone" then
+        local url_base = arg[2]
+        local packfile = url_base:split("/"):back()..".pack"
+        local ref = arg[3]
+        if not ref then
+            ref = gitwit.fetchrefs(url_base).HEAD
+        end
+        print($"Saving {url_base} (at {ref}) to {packfile}...")
+        io.contents(packfile, gitwit.downloadpackfile(url_base, ref))
+        return
+    end
+    if arg[1] == "clone-full" or arg[1] == "full-clone" then
+        local url_base = arg[2]
+        local packfile = url_base:split("/"):back()..".full.pack"
+        local ref = arg[3]
+        if not ref then
+            ref = gitwit.fetchrefs(url_base).HEAD
+        end
+        print($"Saving {url_base} (from {ref} to genesis) to {packfile}...")
+        io.contents(packfile, gitwit.downloadfullpackfile(url_base, ref))
+        return
+    end
+    local function print_obj(obj)
+        if obj.type == "commit" then
+            print(obj.type, obj.hash, obj.data.message:split("\n")[1])
+        else
+            print(obj.type, obj.hash)
+        end
+    end
+    local objects = gitwit.parsepackfile(io.contents(arg[1]))
+    if (arg[2] == "update" or arg[2] == "patch") and arg[3] then
+        local new_objs = gitwit.fetchpackfile(arg[3], arg[4], objects)
+        if #new_objs == 0 then
+            print("# Already up-to-date")
+        else
+            print("# "..#new_objs.." new objects:")
+            for new_objs as new_obj do
+                print_obj(new_obj)
+                objects:insert(new_obj)
+            end
+            io.contents(arg[1], gitwit.createpackfile(objects))
+        end
+        return
+    end
+    if arg[2] == "objects" then
+        for objects as object do
+            print_obj(object)
+        end
+        return
+    end
+    if arg[2] == "commits" then
+        for objects as object do
+            if object.type == "commit" then
+                print(object.type, object.hash, object.data.message:split("\n")[1])
+            end
+        end
+        return
+    end
+    if #arg[2] == 40 then
+        local obj = objects:find(|x| -> x.hash == arg[2])
+        if obj then
+            if obj.type == "tree" then
+                for obj.data as file do
+                    print(file.mode, file.hash, file.name)
+                end
+            else
+                io.write(obj.raw_data)
+            end
+        else
+            print("Found no object with hash "..arg[2])
+        end
+        return
+    end
+end
+print(""
+    .."\nSupported operations:"
+    .."\n"
+    .."\n  pluto gitwit.pluto refs <url>                       List remote refs"
+    .."\n  pluto gitwit.pluto clone <url> [ref]                Perform shallow clone"
+    .."\n  pluto gitwit.pluto clone-full <url> [ref]           Perform full clone"
+    .."\n  pluto gitwit.pluto <packfile> update <url> [ref]    Update clone"
+    .."\n  pluto gitwit.pluto <packfile> objects               List objects"
+    .."\n  pluto gitwit.pluto <packfile> commits               List commits"
+    .."\n  pluto gitwit.pluto <packfile> <hash>                View object"
+)
