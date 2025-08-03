@@ -2,6 +2,7 @@ if not compareversions or compareversions(_PVERSION:sub(7), "0.10.0") < 0 then
 	error("APM requires Pluto 0.10.0 or higher") -- because gitwit requires crypto.decompress
 end
 
+local cat = require "pluto:cat"
 local crypto = require "pluto:crypto"
 local gitwit = require "gitwit"
 
@@ -202,6 +203,22 @@ __apm_atexit = setmetatable({}, {
 			local commit = pkg.objects:find(|x| -> x.hash == pkg.desired_commit_hash)
 			local tree = pkg.objects:find(|x| -> x.hash == commit.data.tree)
 			local remote_files = gitwit.listallfiles(pkg.objects, tree)
+			if #pkg.files == 0 then
+				if apm_yml := remote_files:find(|x| -> x.path == "apm.yml") then
+					apm_yml = pkg.objects:find(|x| -> x.hash == apm_yml.hash).data
+					apm_yml = apm_yml:split("---") apm_yml = apm_yml[#apm_yml] -- Skip frontmatter, if in use.
+					apm_yml = cat.decode(apm_yml:replace("http:", "http\\:"):replace("https:", "https\\:"), "flat") -- CaT is roughly a subset of YAML. Make do for now.
+					if apm_yml.lib then
+						pkg.files:insert({
+							from = apm_yml.lib,
+							to = apm_yml.lib,
+						})
+					end
+				end
+			end
+			if #pkg.files == 0 then
+				print("Unused dependency: "..pkg.url)
+			end
 			for pkg.files as file do
 				local any_matches = false
 				for remote_files as file_entry do
