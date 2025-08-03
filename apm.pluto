@@ -128,6 +128,50 @@ local function matchfile(pattern, name)
     return nil
 end
 
+local function fetch_versions(pkg)
+	local refs = gitwit.fetchrefs(pkg.url)
+	pkg.desired_version = "HEAD"
+	pkg.desired_commit_hash = refs.HEAD
+	if pkg.version then
+		local versions = {}
+		local version_map = {}
+		for ref, hash in refs do
+			if ref:sub(1, 10) == "refs/tags/" then
+				local tag = ref:sub(11)
+				if tag[1] == "v" then
+					tag = tag:sub(2)
+				end
+				versions:insert(tag)
+				version_map[tag] = hash
+			end
+		end
+		if version := get_highest_matching_version(pkg.version, versions) then
+			pkg.desired_version = version
+			pkg.desired_commit_hash = version_map[version]
+		else
+			print(pkg.url.." has no version matching '"..pkg.version.."'")
+		end
+	end
+end
+
+local function update_cache(pkg)
+	local arr = pkg.url:split("/")
+	local packfile_path = ".apm_cache/"..arr[#arr].."."..string.format("%08x", crypto.joaat(pkg.url))..".pack" -- including url hash just in case package name is not unique
+	if io.exists(packfile_path) then
+		pkg.objects = gitwit.parsepackfile(io.contents(packfile_path))
+	else
+		pkg.objects = {}
+	end
+	if not pkg.objects:find(|x| -> x.hash == pkg.desired_commit_hash) then
+		print("Downloading "..pkg.url.." (at "..pkg.desired_version..")...")
+		for gitwit.fetchpackfile(pkg.url, pkg.desired_commit_hash, pkg.objects) as new_obj do
+			pkg.objects:insert(new_obj)
+		end
+		io.contents(packfile_path, gitwit.createpackfile(pkg.objects))
+		pkg.updated = true
+	end
+end
+
 __apm_atexit = setmetatable({}, {
 	__gc = function()
 		if #packages == 0 then
@@ -145,29 +189,7 @@ __apm_atexit = setmetatable({}, {
 
 		print("Fetching versions for "..countstr(#packages, "package", "packages").."...")
 		for packages as pkg do
-			local refs = gitwit.fetchrefs(pkg.url)
-			pkg.desired_version = "HEAD"
-			pkg.desired_commit_hash = refs.HEAD
-			if pkg.version then
-				local versions = {}
-				local version_map = {}
-				for ref, hash in refs do
-					if ref:sub(1, 10) == "refs/tags/" then
-						local tag = ref:sub(11)
-						if tag[1] == "v" then
-							tag = tag:sub(2)
-						end
-						versions:insert(tag)
-						version_map[tag] = hash
-					end
-				end
-				if version := get_highest_matching_version(pkg.version, versions) then
-					pkg.desired_version = version
-					pkg.desired_commit_hash = version_map[version]
-				else
-					print(pkg.url.." has no version matching '"..pkg.version.."'")
-				end
-			end
+			fetch_versions(pkg)
 		end
 
 		if not io.exists(".apm_cache") then
@@ -178,23 +200,11 @@ __apm_atexit = setmetatable({}, {
 		local num_up2date = 0
 		local num_updated = 0
 		for packages as pkg do
-			local arr = pkg.url:split("/")
-			local packfile_path = ".apm_cache/"..arr[#arr].."."..string.format("%08x", crypto.joaat(pkg.url))..".pack" -- including url hash just in case package name is not unique
-			if io.exists(packfile_path) then
-				pkg.objects = gitwit.parsepackfile(io.contents(packfile_path))
+			update_cache(pkg)
+			if pkg.updated then
+				++num_updated
 			else
-				pkg.objects = {}
-			end
-			if not pkg.objects:find(|x| -> x.hash == pkg.desired_commit_hash) then
-				num_updated += 1
-				print("Downloading "..pkg.url.." (at "..pkg.desired_version..")...")
-				for gitwit.fetchpackfile(pkg.url, pkg.desired_commit_hash, pkg.objects) as new_obj do
-					pkg.objects:insert(new_obj)
-				end
-				io.contents(packfile_path, gitwit.createpackfile(pkg.objects))
-				pkg.updated = true
-			else
-				num_up2date += 1
+				++num_up2date
 			end
 		end
 		print(countstr(num_updated, "package", "packages").." downloaded; "..countstr(num_up2date, "was", "were").." up-to-date in cache.")
@@ -218,6 +228,19 @@ __apm_atexit = setmetatable({}, {
 							from = apm_yml.lib,
 							to = config_out .. "/" .. apm_yml.lib,
 						})
+					end
+					if apm_yml.depends then
+						for url, version in apm_yml.depends do
+							print("Adding transitive dependency "..url)
+							local dep = {
+								url = url,
+								version = version,
+								files = {},
+							}
+							packages:insert(dep)
+							fetch_versions(dep)
+							update_cache(dep)
+						end
 					end
 				end
 			end
