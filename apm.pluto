@@ -7,6 +7,7 @@ local crypto = require "pluto:crypto"
 local gitwit = require "gitwit"
 
 local packages = {}
+local config_out = "."
 
 git = function(remote_url)
 	packages:insert({
@@ -30,6 +31,10 @@ end
 
 version = function(version)
 	packages[#packages].version = version
+end
+
+out = function(path)
+	config_out = path
 end
 
 local function countstr(i, singular, plural)
@@ -211,7 +216,7 @@ __apm_atexit = setmetatable({}, {
 					if apm_yml.lib then
 						pkg.files:insert({
 							from = apm_yml.lib,
-							to = apm_yml.lib,
+							to = config_out .. "/" .. apm_yml.lib,
 						})
 					end
 				end
