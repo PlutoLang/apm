@@ -168,7 +168,7 @@ function gitwit.parsepackfile(packfile, base_objects)
         elseif type == 7 then
             -- OBJ_REF_DELTA, has an object hash before the compressed data
             if base_objects then
-                local base_hash = packfile:sub(i, i + 19):split(""):map(|x| -> string.format("%02x", x:byte())):concat("")
+                local base_hash = packfile:sub(i, i + 19):tohex()
                 base = base_objects:find(|x| -> x.hash == base_hash)
             end
             i += 20
@@ -265,8 +265,37 @@ function gitwit.parsepackfile(packfile, base_objects)
         i += info.compressed_size
     end
     --print(crypto.sha1(packfile:sub(1, i - 1)))
-    --print(packfile:sub(i):split(""):map(|x| -> string.format("%02x", x:byte())):concat(""))
+    --print(packfile:sub(i):tohex())
     return objects
+end
+
+function gitwit.parseidx(idx)
+    assert(idx:sub(1, 4) == "\xfftOc")
+    assert(">I4":unpack(idx, 5) == 2)
+    local i = 9
+
+    --[[local cumsum = {}
+    for b = 0, 255 do
+        cumsum[b], i = ">I4":unpack(idx, i)
+    end]]
+    i += 4 * 255
+    local num_objects
+    num_objects, i = ">I4":unpack(idx, i)
+
+    local hashes = {}
+    for j = 1, num_objects do
+        hashes[j] = idx:sub(i, i + 19):tohex()
+        i += 20
+    end
+
+    i += 4 * num_objects -- CRC32
+
+    local offsets = {}
+    for j = 1, num_objects do
+        offsets[hashes[j]], i = ">I4":unpack(idx, i)
+    end
+
+    return { offsets = offsets }
 end
 
 function gitwit.blobhash(data)
@@ -301,7 +330,7 @@ function gitwit.parsetree(data)
             i += 1
         end
         i += 1
-        local hash = data:sub(i, i + 19):split(""):map(|x| -> string.format("%02x", x:byte())):concat("")
+        local hash = data:sub(i, i + 19):tohex()
         i += 20
         files:insert({
             mode = mode:concat(""),

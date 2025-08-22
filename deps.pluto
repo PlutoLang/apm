@@ -1,4 +1,3 @@
 ;(require"http".request"//use.agnostic.pm"|>load)()
 
 git "https://github.com/PlutoLang/gitwit"
-	from "gitwit.pluto" to "gitwit.pluto"
