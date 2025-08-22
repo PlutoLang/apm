@@ -222,7 +222,10 @@ __apm_atexit = setmetatable({}, {
 				if apm_yml := remote_files:find(|x| -> x.path == "apm.yml") then
 					apm_yml = pkg.objects:find(|x| -> x.hash == apm_yml.hash).data
 					apm_yml = apm_yml:split("---") apm_yml = apm_yml[#apm_yml] -- Skip frontmatter, if in use.
-					apm_yml = cat.decode(apm_yml:replace("http:", "http\\:"):replace("https:", "https\\:"), "flat") -- CaT is roughly a subset of YAML. Make do for now.
+					apm_yml = cat.decode( -- We have no native YAML parser in Pluto yet, but CaT is roughly a subset, so we can make do.
+						apm_yml:replace("http:", "http\\:"):replace("https:", "https\\:"), -- Fix parsing error prior to Pluto 0.11.2
+						"flat"
+					)
 					if apm_yml.lib then
 						pkg.files:insert({
 							from = apm_yml.lib,
