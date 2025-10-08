@@ -132,7 +132,7 @@ local function fetch_versions(pkg)
 	local refs = gitwit.fetchrefs(pkg.url)
 	pkg.desired_version = "HEAD"
 	pkg.desired_commit_hash = refs.HEAD
-	if pkg.version then
+	if pkg.version and pkg.version ~= "" and pkg.version ~= "*" then
 		local versions = {}
 		local version_map = {}
 		for ref, hash in refs do
